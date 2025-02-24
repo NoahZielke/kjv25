@@ -36,8 +36,7 @@ function getVerseLists(input) {
 function referenceMatcher(input) {
     const searchTerms = input.split(/\s*,\s*/); // Split input by commas and trim spaces
 
-    // This prevents the bug. This function does not handle large strings that don't match any of the regexes well. It freezes on longer input
-    // Consider also cases like "Song of text text text text", or "John text text text text text", etc. Those still break it
+    // This prevents the bug. It was rooted in bad regexes which did "catastrophic backtracking"
     const terminator = searchTerms[0].split(" ");
     if (getBookNumberFromName(terminator[0]) == 100 && getBookNumberFromName(terminator[0] + " " + terminator[1]) == 100) {
         return [];
@@ -45,10 +44,10 @@ function referenceMatcher(input) {
 
     let rawVerseRanges = [];
 
-    const fullBookRegex = new RegExp(/(\d*?\s*?\w+(?:\s+\w+)*)+\s+(all)/, 'i');                 // John all
-    const fullChapterRegex = /(\d*?\s*?\w+(?:\s+\w+)*)+\s+(\d+)(?:-(\d+))?/;                    // John 1, John 1-3
-    const fullVerseRegexColon = /(\d*?\s*?\w+(?:\s+\w+)*)+\s+(\d+):(\d+)(?:-(\d+):(\d+))?/;     // John 1:23-1:24, John 1:23-2:34
-    const fullVerseRegexNoColon = /(\d*?\s*?\w+(?:\s+\w+)*)+\s+(\d+):(\d+)(?:-(\d+))?/;         // John 1:23, John 1:23-24
+    const fullBookRegex = /(\d*\s*\w+(?:\s+\w+)*)\s+(all)/;                                     // John all
+    const fullChapterRegex = /(\d*\s*\w+(?:\s+\w+)*)\s+(\d+)(?:-(\d+))?/;                       // John 1, John 1-3
+    const fullVerseRegexColon = /(\d*\s*\w+(?:\s+\w+)*)\s+(\d+):(\d+)(?:-(\d+):(\d+))?/;        // John 1:23-1:24, John 1:23-2:34
+    const fullVerseRegexNoColon = /(\d*\s*\w+(?:\s+\w+)*)\s+(\d+):(\d+)(?:-(\d+))?/;            // John 1:23, John 1:23-24
     const partialVerseRegexColon = /(\d+):(\d+)(?:-(\d+))?:?(\d+)?/;                            // 1:29, 1:30-31, 1:31-1:32
     const partialVerseRegexVerseRange = /(\d+)(?:-(\d+))?/;                                     // 26, 26-27
 
@@ -72,6 +71,8 @@ function referenceMatcher(input) {
             parsedResult.endChapter = match[4];
             parsedResult.startVerse = match[3];
             parsedResult.endVerse = match[5];
+
+            rawVerseRanges.push(parsedResult);
         }
         // Match full verse reference without chapter change (e.g., John 1:23, John 1:23-24)
         else if ((match = term.match(fullVerseRegexNoColon))) {
@@ -88,6 +89,8 @@ function referenceMatcher(input) {
                 parsedResult.startVerse = match[3];
                 parsedResult.endVerse = match[3]; // assume start and end are the same if there is no end
             }
+
+            rawVerseRanges.push(parsedResult);
         }
         // Match full book reference (e.g. John all)
         else if ((match = term.match(fullBookRegex))) {
@@ -98,6 +101,8 @@ function referenceMatcher(input) {
             parsedResult.endChapter = chapter;
             parsedResult.startVerse = 1;
             parsedResult.endVerse = getVerseCount(book, chapter);
+
+            rawVerseRanges.push(parsedResult);
         }
         // Match full chapter reference (e.g., John 1, John 1-3)
         else if ((match = term.match(fullChapterRegex))) {
@@ -116,6 +121,7 @@ function referenceMatcher(input) {
                 parsedResult.startVerse = 1;
                 parsedResult.endVerse = getVerseCount(book, match[2]);
             }
+            rawVerseRanges.push(parsedResult);
         }
         // Match partial verse reference with chapter (e.g., 1:29, 1:30-31, 1:31-1:32)
         else if ((match = term.match(partialVerseRegexColon))) {
@@ -135,6 +141,7 @@ function referenceMatcher(input) {
                 parsedResult.startVerse = match[2];
                 parsedResult.endVerse = match[2]; // assume start and end are the same if there is no end
             }
+            rawVerseRanges.push(parsedResult);
         }
         // Match verse-only range (e.g., 26, 26-27)
         else if ((match = term.match(partialVerseRegexVerseRange))) {
@@ -145,68 +152,72 @@ function referenceMatcher(input) {
                 parsedResult.startVerse = match[1];
                 parsedResult.endVerse = match[1]; // assume start and end are the same if there is no end
             }
+            rawVerseRanges.push(parsedResult);
         }
 
-        rawVerseRanges.push(parsedResult);
 
     });
 
-    // Inheritance of book and chapter for refs without that info
-    let lastBook = null;
-    let lastChapter = null;
-    rawVerseRanges.forEach(entry => {
-        if (entry.book === null && lastBook !== null) {
-            entry.book = lastBook; // Update missing book
-        } else {
-            lastBook = entry.book; // Store last valid book
-        }
-    
-        if (entry.endChapter === null && lastChapter !== null) {
-            entry.endChapter = lastChapter; // Update missing chapter
-            entry.startChapter = lastChapter;
-        } else {
-            lastChapter = entry.endChapter; // Store last valid chapter
-        }
-    });
-
-    // Remove any results whose books didn't exist
-    let filteredVerseRanges = rawVerseRanges.filter(entry => {
-        return entry.book != "100" && entry.endVerse != "0" && entry.endChapter != "0";
-    });
-
-    // Create (book, chapter, verse) lists while ensuring verses exist
-    let verseList = filteredVerseRanges.map(range => {
-        let { book, startChapter, endChapter, startVerse, endVerse } = range;
-        book = parseInt(book, 10);
-        startChapter = parseInt(startChapter, 10);
-        endChapter = parseInt(endChapter, 10);
-        startVerse = parseInt(startVerse, 10);
-        endVerse = parseInt(endVerse, 10);
-
-        let verses = [];
-
-        for (let chapter = startChapter; chapter <= endChapter; chapter++) {
-            let maxVerseCount = getVerseCount(book, chapter); // Ensure chapter exists
-            if (maxVerseCount === 0) continue; // Skip non-existent chapters
-
-            let firstVerse = (chapter === startChapter) ? startVerse : 1;
-            let lastVerse = (chapter === endChapter) ? endVerse : maxVerseCount;
-
-            // Ensure endVerse does not exceed actual verse count
-            lastVerse = Math.min(lastVerse, maxVerseCount);
-
-            for (let verse = firstVerse; verse <= lastVerse; verse++) {
-                verses.push({ book, chapter, verse });
+    if (rawVerseRanges.length > 0) {
+        // Inheritance of book and chapter for refs without that info
+        let lastBook = null;
+        let lastChapter = null;
+        rawVerseRanges.forEach(entry => {
+            if (entry.book === null && lastBook !== null) {
+                entry.book = lastBook; // Update missing book
+            } else {
+                lastBook = entry.book; // Store last valid book
             }
-        }
+        
+            if (entry.endChapter === null && lastChapter !== null) {
+                entry.endChapter = lastChapter; // Update missing chapter
+                entry.startChapter = lastChapter;
+            } else {
+                lastChapter = entry.endChapter; // Store last valid chapter
+            }
+        });
 
-        return verses;  // A list of lists of verse entries. List[search term[verse entry, ...], search term[...], ...]
-    });
+        // Remove any results whose books didn't exist
+        let filteredVerseRanges = rawVerseRanges.filter(entry => {
+            return entry.book != "100" && entry.endVerse != "0" && entry.endChapter != "0";
+        });
 
-    // Strip empty lists, each represent an empty comma-separated query term
-    verseList = verseList.filter(verses => verses.length > 0);
+        // Create (book, chapter, verse) lists while ensuring verses exist
+        let verseList = filteredVerseRanges.map(range => {
+            let { book, startChapter, endChapter, startVerse, endVerse } = range;
+            book = parseInt(book, 10);
+            startChapter = parseInt(startChapter, 10);
+            endChapter = parseInt(endChapter, 10);
+            startVerse = parseInt(startVerse, 10);
+            endVerse = parseInt(endVerse, 10);
 
-    return verseList;
+            let verses = [];
+
+            for (let chapter = startChapter; chapter <= endChapter; chapter++) {
+                let maxVerseCount = getVerseCount(book, chapter); // Ensure chapter exists
+                if (maxVerseCount === 0) continue; // Skip non-existent chapters
+
+                let firstVerse = (chapter === startChapter) ? startVerse : 1;
+                let lastVerse = (chapter === endChapter) ? endVerse : maxVerseCount;
+
+                // Ensure endVerse does not exceed actual verse count
+                lastVerse = Math.min(lastVerse, maxVerseCount);
+
+                for (let verse = firstVerse; verse <= lastVerse; verse++) {
+                    verses.push({ book, chapter, verse });
+                }
+            }
+
+            return verses;  // A list of lists of verse entries. List[search term[verse entry, ...], search term[...], ...]
+        });
+
+        // Strip empty lists, each represent an empty comma-separated query term
+        verseList = verseList.filter(verses => verses.length > 0);
+
+        return verseList;
+    } else {
+        return [];
+    }
 }
 
 function stringSearch(input) {
@@ -465,8 +476,6 @@ document.getElementById("searchForm").addEventListener("submit", function(event)
 
 function getBookNumberFromName(bookRaw) {
     let book = bookRaw.toLowerCase().replace(/\s/g, '');
-
-    console.log(book)
     
     if (book === "genesis" || book === "gen") {
         return 1;
